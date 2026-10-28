@@ -59,7 +59,7 @@ jobs:
           SRC: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git config core.autocrlf false    # Windows runners: keep the repo's LF endings
+          # munjez-infra has `* text=auto eol=lf` in .gitattributes, so Windows checkouts are LF too.
           [[ "$FULL" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ && "$STACK" =~ ^[a-z0-9._-]+$ ]] \
             || { echo "bad input: ref must be ghcr.io/<owner>/<image>@sha256:<64 hex>"; exit 1; }
           ref="${FULL%@*}"; digest="${FULL#*@}"
@@ -70,10 +70,14 @@ jobs:
           re="ghcr[.]io/[a-z0-9_.-]+/${image//./[.]}"
           grep -qE "image: *${re}[@:]" "$f" || { echo "no 'image: ghcr.io/<owner>/$image' line in $f"; exit 1; }
           sed -i -E "s#(image: *)${re}[@:][^ ]*#\1${ref}@${digest}#" "$f"
-          if git diff --quiet; then echo "digest unchanged, nothing to deploy"; exit 0; fi
+          if git diff --quiet -- "$f"; then echo "digest unchanged, nothing to deploy"; exit 0; fi
           git config user.name  "sijiltech-deployer[bot]"
           git config user.email "sijiltech-deployer[bot]@users.noreply.github.com"
-          git commit -qam "staging: $image -> ${digest:7:12} ($SRC@${GITHUB_SHA:0:7})" \
+          # Commit ONLY the stack file; refuse if anything else would go in (e.g. CRLF noise on Windows).
+          git add -- "$f"
+          staged="$(git diff --cached --name-only)"
+          [ "$staged" = "$f" ] || { echo "refusing: staged files are not exactly $f:"; echo "$staged"; exit 1; }
+          git commit -q -m "staging: $image -> ${digest:7:12} ($SRC@${GITHUB_SHA:0:7})" \
             -m "image: $ref@$digest" -m "source: $GITHUB_SERVER_URL/$SRC/commit/$GITHUB_SHA" \
             -m "run: $GITHUB_SERVER_URL/$SRC/actions/runs/$GITHUB_RUN_ID"
           for i in 1 2 3 4 5; do   # other repos may bump at the same time
