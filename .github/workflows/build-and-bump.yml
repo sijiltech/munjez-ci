@@ -5,7 +5,7 @@
 # Caller (in an app repo, branch staging):
 #   jobs:
 #     release:
-#       uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@main   # public repo
+#       uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@<commit sha>   # public repo; pin to a SHA (zizmor)
 #       with: { image: admin-web, stack: admin-web-staging }
 #       secrets:   # cross-account callers cannot use `secrets: inherit`
 #         MUNJEZ_DEPLOYER_APP_ID: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
@@ -87,7 +87,7 @@ jobs:
   bump:
     if: inputs.bump
     needs: build
-    uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@main
+    uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@bc11b8f44b07d54b71086ba8067144c997527ade  # main 2026-10-28
     with:
       ref: ${{ needs.build.outputs.ref }}@${{ needs.build.outputs.digest }}
       stack: ${{ inputs.stack }}

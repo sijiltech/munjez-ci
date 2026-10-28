@@ -23,7 +23,7 @@ on:
 permissions: {}
 jobs:
   release:
-    uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@main
+    uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@<commit sha>   # pin to a SHA (zizmor unpinned-uses)
     with: { image: admin-web, stack: admin-web-staging }   # runs-on: '["self-hosted","Windows"]' if hosted minutes are out
     secrets:   # repos in other accounts cannot use `secrets: inherit`
       MUNJEZ_DEPLOYER_APP_ID: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}

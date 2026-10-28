@@ -5,7 +5,7 @@
 # Caller (any account; cross-account callers cannot use `secrets: inherit`, pass the two secrets explicitly):
 #   gitops-staging:
 #     needs: image
-#     uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@main
+#     uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@<commit sha>   # pin to a SHA (zizmor unpinned-uses)
 #     with:
 #       ref: ${{ needs.image.outputs.ref }}          # ghcr.io/<owner>/<image>@sha256:<64 hex>
 #       stack: admin-web-staging
