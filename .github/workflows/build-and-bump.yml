@@ -1,22 +1,24 @@
-# Reusable: build an image ONCE, push it to ghcr.io/sijiltech/<image>, then commit the new
-# digest into sijiltech/munjez-infra (stacks/staging/<stack>/compose.yaml). Komodo deploys it.
+# Reusable: build an image ONCE, push it to ghcr.io/<repo owner>/<image> (the caller's own namespace,
+# with the caller's own GITHUB_TOKEN), then commit the new digest into sijiltech/munjez-infra
+# (stacks/staging/<stack>/compose.yaml). Komodo deploys it.
 #
 # Caller (in an app repo, branch staging):
 #   jobs:
 #     release:
-#       uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@main
+#       uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@main   # public repo
 #       with: { image: admin-web, stack: admin-web-staging }
 #       secrets: inherit
 #       permissions: { contents: read, packages: write }
 #
-# Secrets (org level, visible to private repos): MUNJEZ_DEPLOYER_APP_ID, MUNJEZ_DEPLOYER_PRIVATE_KEY
-# (GitHub App "sijiltech-deployer", installed ONLY on munjez-infra, Contents: write).
+# Repo secrets (free plan: org secrets do not reach private repos): MUNJEZ_DEPLOYER_APP_ID,
+# MUNJEZ_DEPLOYER_PRIVATE_KEY (GitHub App "sijiltech-deployer", installed ONLY on munjez-infra,
+# Contents + Pull requests write). One App private key per account owner, so each can be revoked alone.
 name: build-and-bump
 
 on:
   workflow_call:
     inputs:
-      image:        { type: string, required: true,  description: "image name under ghcr.io/sijiltech/" }
+      image:        { type: string, required: true,  description: "image name under ghcr.io/<repo owner>/" }
       stack:        { type: string, required: true,  description: "folder under stacks/staging/ in munjez-infra" }
       context:      { type: string, required: false, default: "." }
       dockerfile:   { type: string, required: false, default: "Dockerfile" }
@@ -26,6 +28,8 @@ on:
     outputs:
       digest:
         value: ${{ jobs.build.outputs.digest }}
+      ref:
+        value: ${{ jobs.build.outputs.ref }}
 
 permissions: {}
 
@@ -34,10 +38,16 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     permissions:
       contents: read
-      packages: write          # push to ghcr.io/sijiltech/* with the repo's own GITHUB_TOKEN (no PAT)
+      packages: write          # push to ghcr.io/<owner>/* with the repo's own GITHUB_TOKEN (no PAT)
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+      ref: ${{ steps.ref.outputs.name }}
     steps:
+      - id: ref                # GHCR names must be lowercase (MasoudOps -> masoudops)
+        env: { IMAGE: "${{ inputs.image }}" }
+        run: |
+          [[ "$IMAGE" =~ ^[a-z0-9._/-]+$ ]] || { echo "bad image name"; exit 1; }
+          echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$IMAGE" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -54,7 +64,7 @@ jobs:
           build-args: ${{ inputs.build-args }}
           push: true
           # Immutable tag per commit; deploys reference the DIGEST, never a tag.
-          tags: ghcr.io/sijiltech/${{ inputs.image }}:sha-${{ github.sha }}
+          tags: ${{ steps.ref.outputs.name }}:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -63,8 +73,8 @@ jobs:
           cache-from: type=gha,scope=${{ inputs.image }}
           cache-to: type=gha,mode=max,scope=${{ inputs.image }}
       - name: Summary
-        env: { DIGEST: "${{ steps.push.outputs.digest }}", IMAGE: "${{ inputs.image }}" }
-        run: echo "pushed ghcr.io/sijiltech/${IMAGE}@${DIGEST} (tag sha-${GITHUB_SHA})" >> "$GITHUB_STEP_SUMMARY"
+        env: { DIGEST: "${{ steps.push.outputs.digest }}", REF: "${{ steps.ref.outputs.name }}" }
+        run: echo "pushed ${REF}@${DIGEST} (tag sha-${GITHUB_SHA})" >> "$GITHUB_STEP_SUMMARY"
 
   bump:
     if: inputs.bump
@@ -89,6 +99,7 @@ jobs:
           IMAGE: ${{ inputs.image }}
           STACK: ${{ inputs.stack }}
           DIGEST: ${{ needs.build.outputs.digest }}
+          REF: ${{ needs.build.outputs.ref }}
           SRC: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -96,14 +107,15 @@ jobs:
             || { echo "bad input"; exit 1; }
           f="stacks/staging/$STACK/compose.yaml"
           [ -f "$f" ] || { echo "$f not found"; exit 1; }
-          ref="ghcr.io/sijiltech/$IMAGE"
-          grep -qE "image: *${ref//./\.}[@:]" "$f" || { echo "no 'image: $ref' line in $f"; exit 1; }
-          sed -i -E "s#(image: *)${ref//./\.}[@:][^ ]*#\1${ref}@${DIGEST}#" "$f"
+          # Match the image by NAME under any ghcr owner: if a repo changes owner later, the line is rewritten.
+          re="ghcr[.]io/[a-z0-9_.-]+/${IMAGE//./[.]}"
+          grep -qE "image: *${re}[@:]" "$f" || { echo "no 'image: ghcr.io/<owner>/$IMAGE' line in $f"; exit 1; }
+          sed -i -E "s#(image: *)${re}[@:][^ ]*#\1${REF}@${DIGEST}#" "$f"
           if git diff --quiet; then echo "digest unchanged"; exit 0; fi
           git config user.name  "sijiltech-deployer[bot]"
           git config user.email "sijiltech-deployer[bot]@users.noreply.github.com"
           git commit -qam "staging: $IMAGE -> ${DIGEST:7:12} ($SRC@${GITHUB_SHA:0:7})" \
-            -m "image: $ref@$DIGEST" -m "source: $GITHUB_SERVER_URL/$SRC/commit/$GITHUB_SHA" \
+            -m "image: $REF@$DIGEST" -m "source: $GITHUB_SERVER_URL/$SRC/commit/$GITHUB_SHA" \
             -m "run: $GITHUB_SERVER_URL/$SRC/actions/runs/$GITHUB_RUN_ID"
           for i in 1 2 3 4 5; do   # other repos may bump at the same time
             git push origin HEAD:main && exit 0

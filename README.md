@@ -1,11 +1,13 @@
 # munjez-ci
 
-Shared GitHub Actions for every Munjez app repo in `sijiltech`. App repos call these; they never deploy.
+Shared GitHub Actions for every Munjez app repo, wherever it lives. Repos stay in their owners'
+accounts; this repo is **public** so any account can call it. It holds workflow code only, no secrets.
+App repos call these; they never deploy.
 
 ```
 app repo push (staging) -> build-and-bump.yml
-   build: docker build ONCE -> ghcr.io/sijiltech/<image>:sha-<commit>  (repo GITHUB_TOKEN, packages:write)
-   bump : GitHub App token -> commit "image: ghcr.io/sijiltech/<image>@sha256:..." into
+   build: docker build ONCE -> ghcr.io/<repo owner>/<image>:sha-<commit>  (repo GITHUB_TOKEN, packages:write)
+   bump : GitHub App token -> commit "image: ghcr.io/<owner>/<image>@sha256:..." into
           sijiltech/munjez-infra  stacks/staging/<stack>/compose.yaml  (branch main)
 munjez-infra push -> webhook -> Komodo staging deploys changed stacks
 production: munjez-infra Actions > promote (PR, same digest) -> merge -> Komodo prod Execute (human)
@@ -27,19 +29,18 @@ jobs:
     permissions: { contents: read, packages: write }
 ```
 
-The stack's compose file must already reference `ghcr.io/sijiltech/<image>` (first switch is a manual edit).
+The stack's compose file in munjez-infra must already have an `image: ghcr.io/<any owner>/<image>` line.
 
-## One-time org setup
+## One-time setup (free plan: secrets are per repo; org secrets do not reach private repos)
 
 | What | Where | Value |
 |---|---|---|
-| GitHub App `sijiltech-deployer` | Org > Settings > Developer settings > GitHub Apps | Repo perms: Contents RW, Pull requests RW, Metadata R. No webhook. Install on **munjez-infra only** |
-| `MUNJEZ_DEPLOYER_APP_ID` | Org secret, private repos | App ID from the App page |
-| `MUNJEZ_DEPLOYER_PRIVATE_KEY` | Org secret, private repos | App > Generate private key (.pem contents) |
-| munjez-ci access | munjez-ci > Settings > Actions > Access | "Accessible from repositories in the sijiltech organization" |
-| Package pulls (Komodo) | bot account classic PAT, `read:packages` only | Vault `secret/sijil/staging/komodo` key `GHCR_READ_TOKEN` |
+| GitHub App `sijiltech-deployer` | sijiltech > Settings > GitHub Apps | Contents RW, Pull requests RW, Metadata R. No webhook. Installed on **munjez-infra only** |
+| `MUNJEZ_DEPLOYER_APP_ID` | Repo secret: each app repo + munjez-infra | App ID (not secret) |
+| `MUNJEZ_DEPLOYER_PRIVATE_KEY` | Repo secret: each app repo + munjez-infra | App private key; one key per account owner, each revocable alone |
+| Package pulls (Komodo) | classic PAT, `read:packages` only | Vault `secret/sijil/staging/komodo`; package owners grant it Read (Package settings > Manage access) |
 
 Security: actions pinned by commit SHA; every job starts from `permissions: {}`; the push token never
 leaves the build job; the App token is scoped to munjez-infra and lives ~1 h; inputs are regex-checked.
-Note: GitHub artifact attestations are not available for private repos on the free plan, so
-provenance/SBOM are attached to the image by buildx instead.
+GitHub artifact attestations are not available for private repos on the free plan, so provenance and
+SBOM are attached to the image by buildx instead.
