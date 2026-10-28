@@ -87,7 +87,7 @@ jobs:
   bump:
     if: inputs.bump
     needs: build
-    uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@bc11b8f44b07d54b71086ba8067144c997527ade  # main 2026-10-28
+    uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@6bb905ee51856536b7e901448c62ebe38b486706  # main 2026-10-28
     with:
       ref: ${{ needs.build.outputs.ref }}@${{ needs.build.outputs.digest }}
       stack: ${{ inputs.stack }}
