@@ -24,10 +24,15 @@ permissions: {}
 jobs:
   release:
     uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@main
-    with: { image: admin-web, stack: admin-web-staging }
-    secrets: inherit
+    with: { image: admin-web, stack: admin-web-staging }   # runs-on: '["self-hosted","Windows"]' if hosted minutes are out
+    secrets:   # repos in other accounts cannot use `secrets: inherit`
+      MUNJEZ_DEPLOYER_APP_ID: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
+      MUNJEZ_DEPLOYER_PRIVATE_KEY: ${{ secrets.MUNJEZ_DEPLOYER_PRIVATE_KEY }}
     permissions: { contents: read, packages: write }
 ```
+
+Repo keeps its own build job? Call `gitops-bump.yml` with `ref: ghcr.io/<owner>/<image>@sha256:...` instead
+(see the header of that file).
 
 The stack's compose file in munjez-infra must already have an `image: ghcr.io/<any owner>/<image>` line.
 

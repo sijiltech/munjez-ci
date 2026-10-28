@@ -1,0 +1,83 @@
+# Reusable: commit an already-pushed image digest into sijiltech/munjez-infra
+# (stacks/staging/<stack>/compose.yaml, branch main). Komodo deploys it. Use this when the app repo keeps its
+# own build job; build-and-bump.yml calls it after building.
+#
+# Caller (any account; cross-account callers cannot use `secrets: inherit`, pass the two secrets explicitly):
+#   gitops-staging:
+#     needs: image
+#     uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@main
+#     with:
+#       ref: ${{ needs.image.outputs.ref }}          # ghcr.io/<owner>/<image>@sha256:<64 hex>
+#       stack: admin-web-staging
+#       runs-on: '["self-hosted","Windows"]'        # JSON: a label string or a list of labels
+#     secrets:
+#       MUNJEZ_DEPLOYER_APP_ID: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
+#       MUNJEZ_DEPLOYER_PRIVATE_KEY: ${{ secrets.MUNJEZ_DEPLOYER_PRIVATE_KEY }}
+#     permissions: {}
+name: gitops-bump
+
+on:
+  workflow_call:
+    inputs:
+      ref:     { type: string, required: true,  description: "ghcr.io/<owner>/<image>@sha256:<digest>" }
+      stack:   { type: string, required: true,  description: "folder under stacks/staging/ in munjez-infra" }
+      runs-on: { type: string, required: false, default: '"ubuntu-latest"', description: "JSON label or list" }
+    secrets:
+      MUNJEZ_DEPLOYER_APP_ID:      { required: true }
+      MUNJEZ_DEPLOYER_PRIVATE_KEY: { required: true }
+
+permissions: {}
+
+jobs:
+  bump:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 10
+    permissions: {}            # writes to munjez-infra go through the App token only
+    concurrency:
+      group: munjez-infra-bump-${{ inputs.stack }}
+      cancel-in-progress: false
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
+          private-key: ${{ secrets.MUNJEZ_DEPLOYER_PRIVATE_KEY }}
+          owner: sijiltech
+          repositories: munjez-infra
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: sijiltech/munjez-infra
+          ref: main
+          token: ${{ steps.app.outputs.token }}
+          path: munjez-infra
+      - name: Commit digest to stacks/staging
+        shell: bash
+        working-directory: munjez-infra
+        env:
+          FULL: ${{ inputs.ref }}
+          STACK: ${{ inputs.stack }}
+          SRC: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config core.autocrlf false    # Windows runners: keep the repo's LF endings
+          [[ "$FULL" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ && "$STACK" =~ ^[a-z0-9._-]+$ ]] \
+            || { echo "bad input: ref must be ghcr.io/<owner>/<image>@sha256:<64 hex>"; exit 1; }
+          ref="${FULL%@*}"; digest="${FULL#*@}"
+          owner_image="${ref#ghcr.io/}"; image="${owner_image#*/}"
+          f="stacks/staging/$STACK/compose.yaml"
+          [ -f "$f" ] || { echo "$f not found"; exit 1; }
+          # Match the image by NAME under any ghcr owner: if a repo changes owner later, the line is rewritten.
+          re="ghcr[.]io/[a-z0-9_.-]+/${image//./[.]}"
+          grep -qE "image: *${re}[@:]" "$f" || { echo "no 'image: ghcr.io/<owner>/$image' line in $f"; exit 1; }
+          sed -i -E "s#(image: *)${re}[@:][^ ]*#\1${ref}@${digest}#" "$f"
+          if git diff --quiet; then echo "digest unchanged, nothing to deploy"; exit 0; fi
+          git config user.name  "sijiltech-deployer[bot]"
+          git config user.email "sijiltech-deployer[bot]@users.noreply.github.com"
+          git commit -qam "staging: $image -> ${digest:7:12} ($SRC@${GITHUB_SHA:0:7})" \
+            -m "image: $ref@$digest" -m "source: $GITHUB_SERVER_URL/$SRC/commit/$GITHUB_SHA" \
+            -m "run: $GITHUB_SERVER_URL/$SRC/actions/runs/$GITHUB_RUN_ID"
+          for i in 1 2 3 4 5; do   # other repos may bump at the same time
+            git push -q origin HEAD:main && { echo "committed $image@${digest:7:12} to $f" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+            sleep $((i * 3)); git pull -q --rebase origin main
+          done
+          exit 1

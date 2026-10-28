@@ -7,7 +7,9 @@
 #     release:
 #       uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@main   # public repo
 #       with: { image: admin-web, stack: admin-web-staging }
-#       secrets: inherit
+#       secrets:   # cross-account callers cannot use `secrets: inherit`
+#         MUNJEZ_DEPLOYER_APP_ID: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
+#         MUNJEZ_DEPLOYER_PRIVATE_KEY: ${{ secrets.MUNJEZ_DEPLOYER_PRIVATE_KEY }}
 #       permissions: { contents: read, packages: write }
 #
 # Repo secrets (free plan: org secrets do not reach private repos): MUNJEZ_DEPLOYER_APP_ID,
@@ -23,8 +25,11 @@ on:
       context:      { type: string, required: false, default: "." }
       dockerfile:   { type: string, required: false, default: "Dockerfile" }
       build-args:   { type: string, required: false, default: "" }
-      runs-on:      { type: string, required: false, default: "ubuntu-latest" }
+      runs-on:      { type: string, required: false, default: '"ubuntu-latest"', description: "JSON label or list" }
       bump:         { type: boolean, required: false, default: true, description: "false = build/push only" }
+    secrets:
+      MUNJEZ_DEPLOYER_APP_ID:      { required: false }
+      MUNJEZ_DEPLOYER_PRIVATE_KEY: { required: false }
     outputs:
       digest:
         value: ${{ jobs.build.outputs.digest }}
@@ -35,7 +40,8 @@ permissions: {}
 
 jobs:
   build:
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write          # push to ghcr.io/<owner>/* with the repo's own GITHUB_TOKEN (no PAT)
@@ -44,6 +50,7 @@ jobs:
       ref: ${{ steps.ref.outputs.name }}
     steps:
       - id: ref                # GHCR names must be lowercase (MasoudOps -> masoudops)
+        shell: bash
         env: { IMAGE: "${{ inputs.image }}" }
         run: |
           [[ "$IMAGE" =~ ^[a-z0-9._/-]+$ ]] || { echo "bad image name"; exit 1; }
@@ -73,52 +80,19 @@ jobs:
           cache-from: type=gha,scope=${{ inputs.image }}
           cache-to: type=gha,mode=max,scope=${{ inputs.image }}
       - name: Summary
+        shell: bash
         env: { DIGEST: "${{ steps.push.outputs.digest }}", REF: "${{ steps.ref.outputs.name }}" }
         run: echo "pushed ${REF}@${DIGEST} (tag sha-${GITHUB_SHA})" >> "$GITHUB_STEP_SUMMARY"
 
   bump:
     if: inputs.bump
     needs: build
-    runs-on: ${{ inputs.runs-on }}
-    permissions: {}            # writes to munjez-infra go through the App token only
-    steps:
-      - id: app
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          app-id: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
-          private-key: ${{ secrets.MUNJEZ_DEPLOYER_PRIVATE_KEY }}
-          owner: sijiltech
-          repositories: munjez-infra
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: sijiltech/munjez-infra
-          ref: main
-          token: ${{ steps.app.outputs.token }}
-      - name: Commit digest to stacks/staging
-        env:
-          IMAGE: ${{ inputs.image }}
-          STACK: ${{ inputs.stack }}
-          DIGEST: ${{ needs.build.outputs.digest }}
-          REF: ${{ needs.build.outputs.ref }}
-          SRC: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          [[ "$IMAGE" =~ ^[a-z0-9._/-]+$ && "$STACK" =~ ^[a-z0-9._-]+$ && "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
-            || { echo "bad input"; exit 1; }
-          f="stacks/staging/$STACK/compose.yaml"
-          [ -f "$f" ] || { echo "$f not found"; exit 1; }
-          # Match the image by NAME under any ghcr owner: if a repo changes owner later, the line is rewritten.
-          re="ghcr[.]io/[a-z0-9_.-]+/${IMAGE//./[.]}"
-          grep -qE "image: *${re}[@:]" "$f" || { echo "no 'image: ghcr.io/<owner>/$IMAGE' line in $f"; exit 1; }
-          sed -i -E "s#(image: *)${re}[@:][^ ]*#\1${REF}@${DIGEST}#" "$f"
-          if git diff --quiet; then echo "digest unchanged"; exit 0; fi
-          git config user.name  "sijiltech-deployer[bot]"
-          git config user.email "sijiltech-deployer[bot]@users.noreply.github.com"
-          git commit -qam "staging: $IMAGE -> ${DIGEST:7:12} ($SRC@${GITHUB_SHA:0:7})" \
-            -m "image: $REF@$DIGEST" -m "source: $GITHUB_SERVER_URL/$SRC/commit/$GITHUB_SHA" \
-            -m "run: $GITHUB_SERVER_URL/$SRC/actions/runs/$GITHUB_RUN_ID"
-          for i in 1 2 3 4 5; do   # other repos may bump at the same time
-            git push origin HEAD:main && exit 0
-            sleep $((i * 3)); git pull -q --rebase origin main
-          done
-          exit 1
+    uses: sijiltech/munjez-ci/.github/workflows/gitops-bump.yml@main
+    with:
+      ref: ${{ needs.build.outputs.ref }}@${{ needs.build.outputs.digest }}
+      stack: ${{ inputs.stack }}
+      runs-on: ${{ inputs.runs-on }}
+    secrets:
+      MUNJEZ_DEPLOYER_APP_ID: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
+      MUNJEZ_DEPLOYER_PRIVATE_KEY: ${{ secrets.MUNJEZ_DEPLOYER_PRIVATE_KEY }}
+    permissions: {}
