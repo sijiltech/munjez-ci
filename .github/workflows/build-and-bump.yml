@@ -1,0 +1,112 @@
+# Reusable: build an image ONCE, push it to ghcr.io/sijiltech/<image>, then commit the new
+# digest into sijiltech/munjez-infra (stacks/staging/<stack>/compose.yaml). Komodo deploys it.
+#
+# Caller (in an app repo, branch staging):
+#   jobs:
+#     release:
+#       uses: sijiltech/munjez-ci/.github/workflows/build-and-bump.yml@main
+#       with: { image: admin-web, stack: admin-web-staging }
+#       secrets: inherit
+#       permissions: { contents: read, packages: write }
+#
+# Secrets (org level, visible to private repos): MUNJEZ_DEPLOYER_APP_ID, MUNJEZ_DEPLOYER_PRIVATE_KEY
+# (GitHub App "sijiltech-deployer", installed ONLY on munjez-infra, Contents: write).
+name: build-and-bump
+
+on:
+  workflow_call:
+    inputs:
+      image:        { type: string, required: true,  description: "image name under ghcr.io/sijiltech/" }
+      stack:        { type: string, required: true,  description: "folder under stacks/staging/ in munjez-infra" }
+      context:      { type: string, required: false, default: "." }
+      dockerfile:   { type: string, required: false, default: "Dockerfile" }
+      build-args:   { type: string, required: false, default: "" }
+      runs-on:      { type: string, required: false, default: "ubuntu-latest" }
+      bump:         { type: boolean, required: false, default: true, description: "false = build/push only" }
+    outputs:
+      digest:
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      packages: write          # push to ghcr.io/sijiltech/* with the repo's own GITHUB_TOKEN (no PAT)
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+          build-args: ${{ inputs.build-args }}
+          push: true
+          # Immutable tag per commit; deploys reference the DIGEST, never a tag.
+          tags: ghcr.io/sijiltech/${{ inputs.image }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ inputs.image }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image }}
+      - name: Summary
+        env: { DIGEST: "${{ steps.push.outputs.digest }}", IMAGE: "${{ inputs.image }}" }
+        run: echo "pushed ghcr.io/sijiltech/${IMAGE}@${DIGEST} (tag sha-${GITHUB_SHA})" >> "$GITHUB_STEP_SUMMARY"
+
+  bump:
+    if: inputs.bump
+    needs: build
+    runs-on: ${{ inputs.runs-on }}
+    permissions: {}            # writes to munjez-infra go through the App token only
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.MUNJEZ_DEPLOYER_APP_ID }}
+          private-key: ${{ secrets.MUNJEZ_DEPLOYER_PRIVATE_KEY }}
+          owner: sijiltech
+          repositories: munjez-infra
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: sijiltech/munjez-infra
+          ref: main
+          token: ${{ steps.app.outputs.token }}
+      - name: Commit digest to stacks/staging
+        env:
+          IMAGE: ${{ inputs.image }}
+          STACK: ${{ inputs.stack }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          SRC: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ ^[a-z0-9._/-]+$ && "$STACK" =~ ^[a-z0-9._-]+$ && "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "bad input"; exit 1; }
+          f="stacks/staging/$STACK/compose.yaml"
+          [ -f "$f" ] || { echo "$f not found"; exit 1; }
+          ref="ghcr.io/sijiltech/$IMAGE"
+          grep -qE "image: *${ref//./\.}[@:]" "$f" || { echo "no 'image: $ref' line in $f"; exit 1; }
+          sed -i -E "s#(image: *)${ref//./\.}[@:][^ ]*#\1${ref}@${DIGEST}#" "$f"
+          if git diff --quiet; then echo "digest unchanged"; exit 0; fi
+          git config user.name  "sijiltech-deployer[bot]"
+          git config user.email "sijiltech-deployer[bot]@users.noreply.github.com"
+          git commit -qam "staging: $IMAGE -> ${DIGEST:7:12} ($SRC@${GITHUB_SHA:0:7})" \
+            -m "image: $ref@$DIGEST" -m "source: $GITHUB_SERVER_URL/$SRC/commit/$GITHUB_SHA" \
+            -m "run: $GITHUB_SERVER_URL/$SRC/actions/runs/$GITHUB_RUN_ID"
+          for i in 1 2 3 4 5; do   # other repos may bump at the same time
+            git push origin HEAD:main && exit 0
+            sleep $((i * 3)); git pull -q --rebase origin main
+          done
+          exit 1
